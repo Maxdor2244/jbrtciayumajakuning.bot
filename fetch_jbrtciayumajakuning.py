@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 
 # =========================================================
 # JBRTCIAYUMAJAKUNING
-# AUTO POST RUMAH & TANAH
+# AUTO POST JUAL BELI RUMAH & TANAH
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -20,66 +20,205 @@ CHAT_ID = (
     or ""
 ).strip()
 
-# RSS APP
-RSS_URL = "https://rss.app/r/feed/Mlc5shYuFREkcpMt"
+
+# =========================================================
+# SUMBER RSS
+# =========================================================
+
+RSS_URLS = [
+    "https://rss.app/feeds/Mlc5shYuFREkcpMt.xml",
+    "https://rss.app/feeds/NS26IWfOwwr3jnCu.xml",
+    "https://rss.app/feeds/UGlfJoXKzJVB3OD8.xml",
+]
+
+
+# =========================================================
+# PENGATURAN
+# =========================================================
 
 SENT_FILE = "sent.json"
+
+# Maksimal posting baru dari setiap RSS
+MAX_POST_PER_RSS = 3
+
+# Jeda antar posting
+POST_DELAY = 3
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 # =========================================================
-# VALIDASI
+# VALIDASI SECRET
 # =========================================================
 
 def validate_config():
 
+    print("🔍 Memeriksa konfigurasi...")
+
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN tidak ditemukan.")
+        print("❌ BOT_TOKEN belum ditemukan.")
         print("Tambahkan BOT_TOKEN di GitHub Secrets.")
         raise SystemExit(1)
 
     if not CHAT_ID:
-        print("❌ CHAT_ID tidak ditemukan.")
+        print("❌ CHAT_ID belum ditemukan.")
         print("Tambahkan CHAT_ID di GitHub Secrets.")
         raise SystemExit(1)
 
+    print("✅ BOT_TOKEN ditemukan.")
+    print("✅ CHAT_ID ditemukan.")
+
 
 # =========================================================
-# DATABASE ANTI DUPLIKAT
+# CEK BOT TELEGRAM
+# =========================================================
+
+def check_bot():
+
+    print("\n🤖 Memeriksa koneksi Telegram...")
+
+    try:
+
+        response = requests.get(
+            f"{TELEGRAM_API}/getMe",
+            timeout=30
+        )
+
+        data = response.json()
+
+    except Exception as error:
+
+        print(f"❌ Tidak dapat terhubung ke Telegram: {error}")
+        return False
+
+    if data.get("ok"):
+
+        bot = data.get("result", {})
+
+        print(
+            f"✅ Bot aktif: "
+            f"@{bot.get('username', 'unknown')}"
+        )
+
+        return True
+
+    print("❌ BOT_TOKEN tidak valid.")
+    print(response.text)
+
+    return False
+
+
+# =========================================================
+# CEK CHAT / CHANNEL
+# =========================================================
+
+def check_chat():
+
+    print("\n📢 Memeriksa CHAT_ID...")
+
+    try:
+
+        response = requests.get(
+            f"{TELEGRAM_API}/getChat",
+            params={
+                "chat_id": CHAT_ID
+            },
+            timeout=30
+        )
+
+        data = response.json()
+
+    except Exception as error:
+
+        print(f"❌ Gagal memeriksa CHAT_ID: {error}")
+        return False
+
+    if data.get("ok"):
+
+        chat = data.get("result", {})
+
+        print(
+            f"✅ Tujuan Telegram: "
+            f"{chat.get('title') or chat.get('username') or chat.get('first_name', 'Unknown')}"
+        )
+
+        print(
+            f"   Chat ID: {chat.get('id')}"
+        )
+
+        return True
+
+    print("❌ CHAT_ID tidak dapat diakses.")
+    print(response.text)
+
+    return False
+
+
+# =========================================================
+# LOAD POSTING YANG SUDAH DIKIRIM
 # =========================================================
 
 def load_sent():
 
     if not os.path.exists(SENT_FILE):
-        return []
+
+        return set()
 
     try:
-        with open(SENT_FILE, "r", encoding="utf-8") as file:
+
+        with open(
+            SENT_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
             data = json.load(file)
 
         if isinstance(data, list):
-            return data
+
+            return set(data)
 
     except Exception as error:
-        print(f"⚠️ Gagal membaca sent.json: {error}")
 
-    return []
+        print(
+            f"⚠️ Tidak dapat membaca {SENT_FILE}: "
+            f"{error}"
+        )
 
+    return set()
+
+
+# =========================================================
+# SIMPAN POSTING YANG SUDAH DIKIRIM
+# =========================================================
 
 def save_sent(sent):
 
-    with open(SENT_FILE, "w", encoding="utf-8") as file:
-        json.dump(
-            sent,
-            file,
-            ensure_ascii=False,
-            indent=2
+    try:
+
+        with open(
+            SENT_FILE,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            json.dump(
+                list(sent),
+                file,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as error:
+
+        print(
+            f"⚠️ Gagal menyimpan {SENT_FILE}: "
+            f"{error}"
         )
 
 
 # =========================================================
-# BERSIHKAN TEKS
+# BERSIHKAN HTML
 # =========================================================
 
 def clean_text(text):
@@ -87,32 +226,97 @@ def clean_text(text):
     if not text:
         return ""
 
-    text = re.sub(r"<[^>]+>", " ", text)
+    # Hapus CDATA
+    text = text.replace(
+        "<![CDATA[",
+        ""
+    ).replace(
+        "]]>",
+        ""
+    )
 
+    # Hapus HTML
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text
+    )
+
+    # Decode HTML entity
     text = html.unescape(text)
 
-    text = " ".join(text.split())
+    # Rapikan spasi
+    text = " ".join(
+        text.split()
+    )
 
     return text.strip()
+
+
+# =========================================================
+# EKSTRAK GAMBAR DARI DESCRIPTION
+# =========================================================
+
+def extract_image(text):
+
+    if not text:
+        return None
+
+    patterns = [
+        r'<img[^>]+src=["\']([^"\']+)["\']',
+        r'<media:content[^>]+url=["\']([^"\']+)["\']',
+        r'<enclosure[^>]+url=["\']([^"\']+)["\']'
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE
+        )
+
+        if match:
+
+            return match.group(1)
+
+    return None
 
 
 # =========================================================
 # FORMAT POSTING
 # =========================================================
 
-def create_message(title, description, link):
+def create_message(
+    title,
+    description,
+    link
+):
 
     title = clean_text(title)
-    description = clean_text(description)
+
+    description = clean_text(
+        description
+    )
 
     if not title:
+
         title = "Properti Baru"
 
     if not description:
-        description = "Informasi jual beli rumah dan tanah."
 
+        description = (
+            "Informasi jual beli "
+            "rumah dan tanah."
+        )
+
+    # Batasi panjang
     if len(description) > 2800:
-        description = description[:2800] + "..."
+
+        description = (
+            description[:2800]
+            + "..."
+        )
 
     message = (
         "🏠 <b>JBRTCIAYUMAJAKUNING</b>\n"
@@ -124,10 +328,13 @@ def create_message(title, description, link):
         f"{html.escape(description)}\n\n"
 
         "━━━━━━━━━━━━━━━━━━\n"
-        "🔗 <b>Detail / Sumber:</b>\n"
+
+        "🔗 <b>Lihat Detail:</b>\n"
         f"{html.escape(link)}\n\n"
 
-        "🏡 <b>Jual Beli Rumah & Tanah</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+
+        "🏡 <b>JUAL BELI RUMAH & TANAH</b>\n"
         "📍 Cirebon • Majalengka • Kuningan\n"
         "📢 JBRTCIAYUMAJAKUNING"
     )
@@ -136,23 +343,21 @@ def create_message(title, description, link):
 
 
 # =========================================================
-# KIRIM TELEGRAM
+# KIRIM TEXT KE TELEGRAM
 # =========================================================
 
-def send_telegram(message):
-
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
+def send_message(message):
 
     try:
 
         response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
-            json=payload,
+            json={
+                "chat_id": CHAT_ID,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False
+            },
             timeout=30
         )
 
@@ -160,19 +365,82 @@ def send_telegram(message):
 
     except Exception as error:
 
-        print(f"❌ Gagal mengirim Telegram: {error}")
+        print(
+            f"❌ Error Telegram: {error}"
+        )
 
         return False
 
-    if response.status_code == 200 and data.get("ok"):
+    if data.get("ok"):
 
-        print("✅ Posting berhasil.")
+        print(
+            "✅ Berhasil posting ke Telegram."
+        )
 
         return True
 
-    print("❌ Telegram menolak posting.")
+    print(
+        "❌ Telegram gagal menerima pesan."
+    )
 
-    print(response.text)
+    print(
+        response.text
+    )
+
+    return False
+
+
+# =========================================================
+# KIRIM FOTO KE TELEGRAM
+# =========================================================
+
+def send_photo(
+    image_url,
+    caption
+):
+
+    if not image_url:
+
+        return False
+
+    try:
+
+        response = requests.post(
+            f"{TELEGRAM_API}/sendPhoto",
+            json={
+                "chat_id": CHAT_ID,
+                "photo": image_url,
+                "caption": caption,
+                "parse_mode": "HTML"
+            },
+            timeout=30
+        )
+
+        data = response.json()
+
+    except Exception as error:
+
+        print(
+            f"⚠️ Gagal mengirim foto: {error}"
+        )
+
+        return False
+
+    if data.get("ok"):
+
+        print(
+            "✅ Foto berhasil dikirim."
+        )
+
+        return True
+
+    print(
+        "⚠️ Foto gagal dikirim."
+    )
+
+    print(
+        response.text
+    )
 
     return False
 
@@ -181,124 +449,393 @@ def send_telegram(message):
 # AMBIL RSS
 # =========================================================
 
-def get_rss():
+def get_rss(url):
 
-    print("📡 Mengambil RSS...")
-    print(RSS_URL)
+    print("\n📡 Mengambil RSS:")
+    print(url)
 
     try:
 
         response = requests.get(
-            RSS_URL,
+            url,
             timeout=30,
             headers={
                 "User-Agent":
-                "Mozilla/5.0 JBRTCIAYUMAJAKUNING/1.0"
+                "Mozilla/5.0 "
+                "JBRTCIAYUMAJAKUNING"
             }
         )
 
     except requests.RequestException as error:
 
-        print(f"❌ Gagal mengambil RSS: {error}")
+        print(
+            f"❌ Gagal mengambil RSS: "
+            f"{error}"
+        )
 
         return None
 
-    print(f"HTTP Status: {response.status_code}")
+    print(
+        f"HTTP Status: "
+        f"{response.status_code}"
+    )
 
     if response.status_code != 200:
 
-        print("❌ RSS tidak dapat diakses.")
+        print(
+            "❌ RSS tidak dapat diakses."
+        )
 
-        print(response.text[:500])
+        print(
+            response.text[:500]
+        )
 
         return None
 
     try:
 
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(
+            response.content
+        )
 
         return root
 
     except ET.ParseError as error:
 
-        print(f"❌ RSS bukan XML yang valid: {error}")
+        print(
+            f"❌ RSS bukan XML valid: "
+            f"{error}"
+        )
 
         return None
 
 
 # =========================================================
-# PROSES RSS
+# AMBIL DATA ITEM RSS
 # =========================================================
 
-def process_feed():
+def get_items(root):
 
-    root = get_rss()
+    # RSS standar
+    items = root.findall(
+        ".//item"
+    )
 
-    if root is None:
-        return 0
+    if items:
 
-    sent = load_sent()
+        return items
 
-    items = root.findall(".//item")
+    # Atom fallback
+    items = root.findall(
+        ".//{http://www.w3.org/2005/Atom}entry"
+    )
 
-    print(f"📦 Ditemukan {len(items)} posting dari RSS.")
+    return items
 
-    if not items:
 
-        print("⚠️ Tidak ada posting.")
+# =========================================================
+# AMBIL NILAI XML
+# =========================================================
 
-        return 0
+def get_item_value(
+    item,
+    tag
+):
 
-    berhasil = 0
+    # RSS biasa
+    element = item.find(tag)
 
-    # Maksimal 3 posting setiap workflow
-    for item in items[:3]:
+    if element is not None:
 
-        title = item.findtext("title", "").strip()
+        return (
+            element.text or ""
+        ).strip()
 
-        link = item.findtext("link", "").strip()
+    # Atom
+    element = item.find(
+        f"{{http://www.w3.org/2005/Atom}}{tag}"
+    )
 
-        description = item.findtext(
-            "description",
+    if element is not None:
+
+        return (
+            element.text or ""
+        ).strip()
+
+    return ""
+
+
+# =========================================================
+# AMBIL LINK
+# =========================================================
+
+def get_item_link(item):
+
+    # RSS
+    link = get_item_value(
+        item,
+        "link"
+    )
+
+    if link:
+
+        return link
+
+    # Atom
+    atom_link = item.find(
+        "{http://www.w3.org/2005/Atom}link"
+    )
+
+    if atom_link is not None:
+
+        return atom_link.attrib.get(
+            "href",
             ""
         ).strip()
 
-        if not link:
+    return ""
 
-            print("⏭️ Posting dilewati karena tidak mempunyai link.")
 
-            continue
+# =========================================================
+# PROSES SEMUA RSS
+# =========================================================
 
-        # Anti duplikat
-        if link in sent:
+def process_feeds():
+
+    sent = load_sent()
+
+    total_items = 0
+
+    total_posted = 0
+
+    for rss_number, rss_url in enumerate(
+        RSS_URLS,
+        start=1
+    ):
+
+        print("\n")
+        print("=" * 65)
+
+        print(
+            f"📡 RSS {rss_number}/{len(RSS_URLS)}"
+        )
+
+        print(rss_url)
+
+        print("=" * 65)
+
+        root = get_rss(
+            rss_url
+        )
+
+        if root is None:
 
             print(
-                f"⏭️ Sudah pernah diposting: {title[:70]}"
+                "⏭️ RSS dilewati."
             )
 
             continue
 
-        message = create_message(
-            title,
-            description,
-            link
+        items = get_items(
+            root
         )
 
         print(
-            f"📨 Mengirim: {title[:70]}"
+            f"📦 Ditemukan "
+            f"{len(items)} item."
         )
 
-        if send_telegram(message):
+        total_items += len(items)
 
-            sent.append(link)
+        # Ambil beberapa terbaru
+        for item in items[
+            :MAX_POST_PER_RSS
+        ]:
 
-            save_sent(sent)
+            title = get_item_value(
+                item,
+                "title"
+            )
 
-            berhasil += 1
+            description = get_item_value(
+                item,
+                "description"
+            )
 
-            time.sleep(3)
+            if not description:
 
-    return berhasil
+                description = get_item_value(
+                    item,
+                    "summary"
+                )
+
+            link = get_item_link(
+                item
+            )
+
+            # Bersihkan
+            title = clean_text(
+                title
+            )
+
+            description = clean_text(
+                description
+            )
+
+            # =====================================
+            # VALIDASI
+            # =====================================
+
+            if not link:
+
+                print(
+                    "⏭️ Item dilewati "
+                    "(tidak ada link)."
+                )
+
+                continue
+
+            # =====================================
+            # ANTI DUPLIKAT
+            # =====================================
+
+            if link in sent:
+
+                print(
+                    f"⏭️ SUDAH DIPOSTING:"
+                )
+
+                print(
+                    f"   {title[:100]}"
+                )
+
+                continue
+
+            # =====================================
+            # TAMPILKAN INFO
+            # =====================================
+
+            print("\n")
+            print(
+                "🆕 LISTING BARU"
+            )
+
+            print(
+                f"Judul: {title[:100]}"
+            )
+
+            print(
+                f"Link: {link}"
+            )
+
+            # =====================================
+            # BUAT PESAN
+            # =====================================
+
+            message = create_message(
+                title,
+                description,
+                link
+            )
+
+            # =====================================
+            # GAMBAR
+            # =====================================
+
+            raw_description = (
+                get_item_value(
+                    item,
+                    "description"
+                )
+            )
+
+            image_url = extract_image(
+                raw_description
+            )
+
+            # =====================================
+            # POSTING
+            # =====================================
+
+            success = False
+
+            if image_url:
+
+                success = send_photo(
+                    image_url,
+                    message
+                )
+
+            # Jika foto gagal / tidak ada
+            if not success:
+
+                success = send_message(
+                    message
+                )
+
+            # =====================================
+            # SIMPAN ANTI DUPLIKAT
+            # =====================================
+
+            if success:
+
+                sent.add(
+                    link
+                )
+
+                save_sent(
+                    sent
+                )
+
+                total_posted += 1
+
+                print(
+                    "✅ Listing tersimpan "
+                    "sebagai sudah diposting."
+                )
+
+                time.sleep(
+                    POST_DELAY
+                )
+
+            else:
+
+                print(
+                    "❌ Listing tidak ditandai "
+                    "sebagai terkirim."
+                )
+
+    # =============================================
+    # HASIL AKHIR
+    # =============================================
+
+    print("\n")
+    print("=" * 65)
+
+    print(
+        "🏠 JBRTCIAYUMAJAKUNING"
+    )
+
+    print(
+        "🏡 AUTO POST JUAL BELI "
+        "RUMAH & TANAH"
+    )
+
+    print("=" * 65)
+
+    print(
+        f"📦 Total item RSS : "
+        f"{total_items}"
+    )
+
+    print(
+        f"📨 Posting baru    : "
+        f"{total_posted}"
+    )
+
+    print("=" * 65)
+
+    return total_posted
 
 
 # =========================================================
@@ -307,26 +844,45 @@ def process_feed():
 
 def main():
 
-    print("=" * 60)
-
-    print("🏠 JBRTCIAYUMAJAKUNING")
-
-    print("🏡 Auto Post Jual Beli Rumah & Tanah")
-
-    print("=" * 60)
-
-    validate_config()
-
-    total = process_feed()
-
-    print("=" * 60)
+    print("\n")
+    print("=" * 65)
 
     print(
-        f"✅ SELESAI — {total} posting baru dikirim."
+        "🏠 JBRTCIAYUMAJAKUNING"
     )
 
-    print("=" * 60)
+    print(
+        "AUTO POST RUMAH & TANAH"
+    )
 
+    print("=" * 65)
+
+    # Cek konfigurasi
+    validate_config()
+
+    # Cek bot
+    if not check_bot():
+
+        raise SystemExit(1)
+
+    # Cek tujuan
+    if not check_chat():
+
+        raise SystemExit(1)
+
+    # Proses RSS
+    process_feeds()
+
+    print("\n")
+    print(
+        "🎉 Workflow selesai."
+    )
+
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
+
     main()
