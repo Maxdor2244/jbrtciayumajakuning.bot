@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import telebot
 from telebot import types
 
-import fetch_loker
+import fetch_jbrtcjayumajakuning.py
 
 
 # =========================
